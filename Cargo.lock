@@ -214,6 +214,7 @@ dependencies = [
  "anyhow",
  "libc",
  "v8",
+ "winapi",
 ]
 
 [[package]]

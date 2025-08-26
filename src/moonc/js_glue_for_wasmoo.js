@@ -44,8 +44,6 @@
     Uint8ClampedArray,
   ];
   
-  const on_windows = false;
-  
   var out_channels = {
     map: new WeakMap(),
     set: new Set(),
@@ -384,7 +382,7 @@
     channel_list,
     exit,
     argv: () => process_argv,
-    on_windows: () => on_windows,
+    on_windows: () => on_windows(),
     getenv,
     backtrace_status: () => record_backtrace_flag,
     record_backtrace: (b) => (record_backtrace_flag = b),

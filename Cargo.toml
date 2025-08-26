@@ -9,3 +9,9 @@ edition = "2024"
 anyhow = { version = "1.0.86" }
 v8 = "0.106.0"
 libc = "0.2.172"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "winerror", "winbase", "handleapi", "processenv"] }
+
+[[bin]]
+name = "moonc_wasm"
