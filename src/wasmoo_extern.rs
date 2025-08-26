@@ -2,16 +2,80 @@
 
 use std::{
     collections::HashMap,
-    ffi::CString,
-    fs::{self, metadata, File, OpenOptions, Permissions},
+    fs::{self, metadata, File, OpenOptions},
     io::{IsTerminal, Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
     path::Path,
     process::{Command, Stdio},
 };
+
+#[cfg(unix)]
+use std::{ffi::CString, fs::Permissions};
+
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+};
+
+
+
+// Windows API structures and functions
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct FileTime {
+    dwLowDateTime: u32,
+    dwHighDateTime: u32,
+}
+
+// Windows API functions
+#[cfg(windows)]
+unsafe extern "system" {
+    fn CreateFileW(
+        lpFileName: *const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: *mut std::ffi::c_void,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void;
+    
+    fn SetFileTime(
+        hFile: *mut std::ffi::c_void,
+        lpCreationTime: *const FileTime,
+        lpLastAccessTime: *const FileTime,
+        lpLastWriteTime: *const FileTime,
+    ) -> i32;
+    
+    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    
+    fn GetConsoleMode(
+        hConsoleHandle: *mut std::ffi::c_void,
+        lpMode: *mut u32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = (-1isize) as *mut std::ffi::c_void;
+
+
+fn on_windows(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut ret: v8::ReturnValue,
+) {
+    #[cfg(unix)]
+    {
+        let val = v8::Boolean::new(scope, false);
+        ret.set(val.into());
+    }
+    #[cfg(windows)]
+    {
+        let val = v8::Boolean::new(scope, true);
+        ret.set(val.into());
+    }
+}
 
 // getenv : JSString -> JSString
 fn getenv(
@@ -35,9 +99,18 @@ fn getenv(
 }
 
 fn make_shell() -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c");
-    cmd
+    #[cfg(unix)]
+    {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c");
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C");
+        cmd
+    }
 }
 
 // system : JSString -> Number
@@ -152,16 +225,37 @@ fn chmod(
     let path = Path::new(&path);
     let mode = args.get(1);
     let mode = mode.to_number(scope).unwrap().value() as u32;
-    let permission = Permissions::from_mode(mode);
-    match fs::set_permissions(path, permission) {
-        Err(err) => {
-            let message = v8::String::new(scope, &err.to_string()).unwrap();
-            let exn = v8::Exception::error(scope, message);
-            scope.throw_exception(exn);
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permission = Permissions::from_mode(mode);
+        match fs::set_permissions(path, permission) {
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+            }
+            Ok(_) => {
+                let undefined = v8::undefined(scope);
+                ret.set(undefined.into())
+            }
         }
-        Ok(_) => {
-            let undefined = v8::undefined(scope);
-            ret.set(undefined.into())
+    }
+    
+    #[cfg(windows)]
+    {
+        // Use the unified Unix permission simulation function
+        match apply_unix_permissions_to_windows(path, mode) {
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+            }
+            Ok(_) => {
+                let undefined = v8::undefined(scope);
+                ret.set(undefined.into())
+            }
         }
     }
 }
@@ -258,6 +352,15 @@ const O_NOCTTY: i32 = 256;
 const O_DSYNC: i32 = 512;
 const O_SYNC: i32 = 1024;
 
+// Windows compatibility constants
+#[cfg(windows)]
+mod windows_compat {
+    pub const O_NONBLOCK: u32 = 0x4000;
+    pub const O_NOCTTY: u32 = 0x8000;
+    pub const O_DSYNC: u32 = 0x1000;
+    pub const O_SYNC: u32 = 0x2000;
+}
+
 // open : JSString as Path, Number as Flags, Number as PermissionMode -> FileDescriptor
 fn open(
     scope: &mut v8::HandleScope,
@@ -299,21 +402,45 @@ fn open(
     } else if has_creat {
         opts.create(true);
     }
-    let mut custom_flags = 0;
-    if (flags & O_NONBLOCK) != 0 {
-        custom_flags |= libc::O_NONBLOCK;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut custom_flags = 0;
+        if (flags & O_NONBLOCK) != 0 {
+            custom_flags |= libc::O_NONBLOCK;
+        }
+        if (flags & O_NOCTTY) != 0 {
+            custom_flags |= libc::O_NOCTTY;
+        }
+        if (flags & O_DSYNC) != 0 {
+            custom_flags |= libc::O_DSYNC;
+        }
+        if (flags & O_SYNC) != 0 {
+            custom_flags |= libc::O_SYNC;
+        }
+        opts.custom_flags(custom_flags);
+        opts.mode((mode & 0o777) as u32); // assure permission is legal
     }
-    if (flags & O_NOCTTY) != 0 {
-        custom_flags |= libc::O_NOCTTY;
+    
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut custom_flags = 0u32;
+        if (flags & O_NONBLOCK) != 0 {
+            custom_flags |= windows_compat::O_NONBLOCK;
+        }
+        if (flags & O_NOCTTY) != 0 {
+            custom_flags |= windows_compat::O_NOCTTY;
+        }
+        if (flags & O_DSYNC) != 0 {
+            custom_flags |= windows_compat::O_DSYNC;
+        }
+        if (flags & O_SYNC) != 0 {
+            custom_flags |= windows_compat::O_SYNC;
+        }
+        opts.custom_flags(custom_flags);
+        // Windows doesn't use Unix-style file mode permissions
     }
-    if (flags & O_DSYNC) != 0 {
-        custom_flags |= libc::O_DSYNC;
-    }
-    if (flags & O_SYNC) != 0 {
-        custom_flags |= libc::O_SYNC;
-    }
-    opts.custom_flags(custom_flags);
-    opts.mode((mode & 0o777) as u32); // assure permission is legal
     match opts.open(path) {
         Err(err) => {
             let message = v8::String::new(scope, &err.to_string()).unwrap();
@@ -415,12 +542,35 @@ fn access(
                 return;
             }
             Ok(metadata) => {
-                let mode = metadata.permissions().mode();
-                if mode & 0o111 == 0 {
-                    let message = v8::String::new(scope, "execute permission denied").unwrap();
-                    let exn = v8::Exception::error(scope, message);
-                    scope.throw_exception(exn);
-                    return;
+                #[cfg(unix)]
+                {
+                    let mode = metadata.permissions().mode();
+                    if mode & 0o111 == 0 {
+                        let message = v8::String::new(scope, "execute permission denied").unwrap();
+                        let exn = v8::Exception::error(scope, message);
+                        scope.throw_exception(exn);
+                        return;
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    // On Windows, check if it's an executable file by extension
+                    if let Some(ext) = path.extension() {
+                        if let Some(ext_str) = ext.to_str() {
+                            let executable_exts = ["exe", "com", "bat", "cmd", "ps1"];
+                            if !executable_exts.iter().any(|&e| ext_str.eq_ignore_ascii_case(e)) {
+                                let message = v8::String::new(scope, "execute permission denied").unwrap();
+                                let exn = v8::Exception::error(scope, message);
+                                scope.throw_exception(exn);
+                                return;
+                            }
+                        }
+                    } else {
+                        let message = v8::String::new(scope, "execute permission denied").unwrap();
+                        let exn = v8::Exception::error(scope, message);
+                        scope.throw_exception(exn);
+                        return;
+                    }
                 }
             }
         }
@@ -612,6 +762,7 @@ fn file_size(
     ret.set(size.into());
 }
 
+#[cfg(unix)]
 fn timeval_from_f64(t: f64) -> std::io::Result<libc::timeval> {
     if !t.is_finite() {
         return Err(std::io::Error::new(
@@ -631,6 +782,9 @@ fn timeval_from_f64(t: f64) -> std::io::Result<libc::timeval> {
     })
 }
 
+
+
+#[cfg(unix)]
 fn __utimes(path: String, atime: f64, mtime: f64) -> std::io::Result<()> {
     let c_path = CString::new(path)?;
 
@@ -645,6 +799,189 @@ fn __utimes(path: String, atime: f64, mtime: f64) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn __utimes(path: String, atime: f64, mtime: f64) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::time::{UNIX_EPOCH, Duration};
+
+    
+    // Convert Unix timestamps to Windows FileTime
+    let atime_duration = Duration::from_secs_f64(atime);
+    let mtime_duration = Duration::from_secs_f64(mtime);
+    
+    let atime_system = UNIX_EPOCH + atime_duration;
+    let mtime_system = UNIX_EPOCH + mtime_duration;
+    
+    // Convert path to wide string for Windows API
+    let path_wide: Vec<u16> = OsStr::new(&path).encode_wide().chain(std::iter::once(0)).collect();
+    
+    unsafe {
+        use std::ptr;
+        
+        // Open file for setting times
+        let handle = CreateFileW(
+            path_wide.as_ptr(),
+            0x100, // FILE_WRITE_ATTRIBUTES
+            7,     // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            ptr::null_mut(),
+            3,     // OPEN_EXISTING
+            0,     // No special flags
+            ptr::null_mut(),
+        );
+        
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        
+        // Convert SystemTime to FileTime
+        let atime_ft = system_time_to_filetime(atime_system)?;
+        let mtime_ft = system_time_to_filetime(mtime_system)?;
+        
+        let result = SetFileTime(handle, ptr::null(), &atime_ft, &mtime_ft);
+        CloseHandle(handle);
+        
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn system_time_to_filetime(time: std::time::SystemTime) -> std::io::Result<FileTime> {
+    use std::time::{UNIX_EPOCH};
+    
+    let duration = time.duration_since(UNIX_EPOCH)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Time before Unix epoch"))?;
+    
+    // Windows FileTime is 100-nanosecond intervals since January 1, 1601
+    // Unix epoch (1970-01-01) is 11644473600 seconds after Windows epoch
+    let windows_ticks = (duration.as_secs() + 11644473600) * 10_000_000 + duration.subsec_nanos() as u64 / 100;
+    
+    Ok(FileTime {
+        dwLowDateTime: (windows_ticks & 0xFFFFFFFF) as u32,
+        dwHighDateTime: (windows_ticks >> 32) as u32,
+    })
+}
+
+// Windows compatibility extensions for FileType
+#[cfg(windows)]
+trait FileTypeExtWindows {
+    fn is_char_device(&self) -> bool;
+    fn is_block_device(&self) -> bool;
+    fn is_fifo(&self) -> bool;
+    fn is_socket(&self) -> bool;
+}
+
+#[cfg(windows)]
+impl FileTypeExtWindows for std::fs::FileType {
+    fn is_char_device(&self) -> bool {
+        false // Windows doesn't distinguish char devices in the same way
+    }
+    
+    fn is_block_device(&self) -> bool {
+        false // Windows doesn't distinguish block devices in the same way
+    }
+    
+    fn is_fifo(&self) -> bool {
+        false // Windows doesn't have FIFO files
+    }
+    
+    fn is_socket(&self) -> bool {
+        false // Regular filesystem API doesn't handle sockets on Windows
+    }
+}
+
+// Windows compatibility extensions for Metadata
+#[cfg(windows)]
+trait MetadataExtWindows {
+    fn dev(&self) -> u64;
+    fn ino(&self) -> u64;
+    fn mode(&self) -> u32;
+    fn nlink(&self) -> u64;
+    fn uid(&self) -> u32;
+    fn gid(&self) -> u32;
+    fn rdev(&self) -> u64;
+    fn size(&self) -> u64;
+    fn atime(&self) -> i64;
+    fn mtime(&self) -> i64;
+    fn ctime(&self) -> i64;
+}
+
+#[cfg(windows)]
+impl MetadataExtWindows for std::fs::Metadata {
+    fn dev(&self) -> u64 {
+        // Use a simple hash of file path since volume_serial_number is unstable
+        0 // Simplified implementation
+    }
+    
+    fn ino(&self) -> u64 {
+        // file_index is unstable, use simple fallback
+        0 // Simplified implementation
+    }
+    
+    fn mode(&self) -> u32 {
+        let mut mode = 0o644; // Default readable/writable
+        if self.is_dir() {
+            mode |= 0o40000; // S_IFDIR
+        } else {
+            mode |= 0o100000; // S_IFREG
+        }
+        if self.permissions().readonly() {
+            mode &= !0o200; // Remove write permission
+        }
+        mode
+    }
+    
+    fn nlink(&self) -> u64 {
+        // number_of_links is unstable, use simple fallback
+        1 // Default to 1 for regular files
+    }
+    
+    fn uid(&self) -> u32 {
+        0 // Windows doesn't have Unix-style UIDs
+    }
+    
+    fn gid(&self) -> u32 {
+        0 // Windows doesn't have Unix-style GIDs
+    }
+    
+    fn rdev(&self) -> u64 {
+        0 // Not applicable on Windows
+    }
+    
+    fn size(&self) -> u64 {
+        self.len()
+    }
+    
+    fn atime(&self) -> i64 {
+        self.accessed()
+            .unwrap_or(std::time::UNIX_EPOCH)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+    
+    fn mtime(&self) -> i64 {
+        self.modified()
+            .unwrap_or(std::time::UNIX_EPOCH)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+    
+    fn ctime(&self) -> i64 {
+        // Use modified time as creation time fallback
+        self.modified()
+            .unwrap_or(std::time::UNIX_EPOCH)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
     }
 }
 
@@ -709,7 +1046,25 @@ fn isatty(
         let context = scope.get_current_context();
         let fd_table = context.get_slot_mut::<FdTable>().unwrap();
         match fd_table.get(fd) {
-            Ok(file) => unsafe { libc::isatty(file.as_raw_fd()) },
+            Ok(file) => {
+                #[cfg(unix)]
+                {
+                    unsafe { libc::isatty(file.as_raw_fd()) }
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::io::AsRawHandle;
+                    unsafe {
+                        let handle = file.as_raw_handle();
+                        let mut mode: u32 = 0;
+                        if GetConsoleMode(handle, &mut mode) != 0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                }
+            },
             Err(_) => 0,
         }
     };
@@ -760,6 +1115,73 @@ fn chdir(
     }
 }
 
+/// Unix permission constants for easier parsing
+#[cfg(windows)]
+mod unix_perms {
+    pub const OWNER_READ: u32 = 0o400;
+    pub const OWNER_WRITE: u32 = 0o200;
+    pub const OWNER_EXEC: u32 = 0o100;
+    pub const GROUP_READ: u32 = 0o040;
+    pub const GROUP_WRITE: u32 = 0o020;
+    pub const GROUP_EXEC: u32 = 0o010;
+    pub const OTHER_READ: u32 = 0o004;
+    pub const OTHER_WRITE: u32 = 0o002;
+    pub const OTHER_EXEC: u32 = 0o001;
+}
+
+/// Parse Unix permission mode and extract individual permission bits
+#[cfg(windows)]
+fn parse_unix_permissions(mode: u32) -> (bool, bool, bool, bool, bool, bool, bool, bool, bool) {
+    use unix_perms::*;
+    (
+        (mode & OWNER_READ) != 0,   // owner can read
+        (mode & OWNER_WRITE) != 0,  // owner can write
+        (mode & OWNER_EXEC) != 0,   // owner can execute
+        (mode & GROUP_READ) != 0,   // group can read
+        (mode & GROUP_WRITE) != 0,  // group can write
+        (mode & GROUP_EXEC) != 0,   // group can execute
+        (mode & OTHER_READ) != 0,   // others can read
+        (mode & OTHER_WRITE) != 0,  // others can write
+        (mode & OTHER_EXEC) != 0,   // others can execute
+    )
+}
+
+/// Parse Unix permission mode and apply equivalent Windows permissions
+/// 
+/// Unix permissions are represented as a 3-digit octal number (e.g., 0o755):
+/// - First digit: owner permissions (4=read, 2=write, 1=execute)
+/// - Second digit: group permissions 
+/// - Third digit: other permissions
+/// 
+/// On Windows, we can only control the read-only flag, so we focus on
+/// the owner write permission. If the owner lacks write permission,
+/// we set the file/directory as read-only.
+#[cfg(windows)]
+fn apply_unix_permissions_to_windows(path: &Path, mode: u32) -> std::io::Result<()> {
+    let (_owner_read, owner_write, _owner_exec, _group_read, _group_write, _group_exec, _other_read, _other_write, _other_exec) = 
+        parse_unix_permissions(mode);
+    
+    // Get current metadata to modify permissions
+    let metadata = fs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+    
+    // Set read-only flag based on owner write permission
+    // If owner cannot write, make it read-only
+    permissions.set_readonly(!owner_write);
+    
+    // Apply the permissions
+    fs::set_permissions(path, permissions)?;
+    
+    // Log the permission mapping for debugging (if needed)
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "Unix mode {:o} -> Windows read-only: {} (owner: r:{} w:{} x:{})",
+        mode, !owner_write, _owner_read, owner_write, _owner_exec
+    );
+    
+    Ok(())
+}
+
 // mkdir: JSString as Path, i32 as Mode -> undefined
 fn mkdir(
     scope: &mut v8::HandleScope,
@@ -770,24 +1192,47 @@ fn mkdir(
     let path = path.to_string(scope).unwrap();
     let path = path.to_rust_string_lossy(scope);
     let mode = args.get(1);
-    let mode = mode.to_number(scope).unwrap().value() as i32;
+    let mode = mode.to_number(scope).unwrap().value() as u32;
     let path = Path::new(&path);
+    
     if let Err(err) = fs::create_dir(path) {
         let message = v8::String::new(scope, &err.to_string()).unwrap();
         let exn = v8::Exception::error(scope, message);
         scope.throw_exception(exn);
         return;
     }
-    let permissions = fs::Permissions::from_mode(mode as u32);
-    match fs::set_permissions(path, permissions) {
-        Err(err) => {
-            let message = v8::String::new(scope, &err.to_string()).unwrap();
-            let exn = v8::Exception::error(scope, message);
-            scope.throw_exception(exn);
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(mode);
+        match fs::set_permissions(path, permissions) {
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+            }
+            Ok(_) => {
+                let undefined = v8::undefined(scope);
+                ret.set(undefined.into());
+            }
         }
-        Ok(_) => {
-            let undefined = v8::undefined(scope);
-            ret.set(undefined.into());
+    }
+    
+    #[cfg(windows)]
+    {
+        // On Windows, simulate Unix permissions by setting read-only flag
+        // if the directory lacks write permission for owner
+        match apply_unix_permissions_to_windows(path, mode) {
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+            }
+            Ok(_) => {
+                let undefined = v8::undefined(scope);
+                ret.set(undefined.into());
+            }
         }
     }
 }
@@ -1116,18 +1561,38 @@ fn stat(
         0
     } else if filetype.is_dir() {
         1
-    } else if filetype.is_char_device() {
-        2
-    } else if filetype.is_block_device() {
-        3
     } else if filetype.is_symlink() {
         4
-    } else if filetype.is_fifo() {
-        5
-    } else if filetype.is_socket() {
-        6
     } else {
-        panic!()
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if filetype.is_char_device() {
+                2
+            } else if filetype.is_block_device() {
+                3
+            } else if filetype.is_fifo() {
+                5
+            } else if filetype.is_socket() {
+                6
+            } else {
+                0 // Default to regular file
+            }
+        }
+        #[cfg(windows)]
+        {
+            if filetype.is_char_device() {
+                2
+            } else if filetype.is_block_device() {
+                3
+            } else if filetype.is_fifo() {
+                5
+            } else if filetype.is_socket() {
+                6
+            } else {
+                0 // Default to regular file
+            }
+        }
     };
 
     let stat = v8::Object::new(scope);
@@ -1137,47 +1602,124 @@ fn stat(
     stat.set(scope, id.into(), kind.into());
 
     let id = v8::String::new(scope, "dev").unwrap();
-    let dev = v8::Number::new(scope, metadata.dev() as f64);
+    #[cfg(unix)]
+    let dev = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.dev() as f64
+    };
+    #[cfg(windows)]
+    let dev = metadata.dev() as f64;
+    let dev = v8::Number::new(scope, dev);
     stat.set(scope, id.into(), dev.into());
 
     let id = v8::String::new(scope, "ino").unwrap();
-    let ino = v8::Number::new(scope, metadata.ino() as f64);
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ino() as f64
+    };
+    #[cfg(windows)]
+    let ino = metadata.ino() as f64;
+    let ino = v8::Number::new(scope, ino);
     stat.set(scope, id.into(), ino.into());
 
     let id = v8::String::new(scope, "mode").unwrap();
-    let mode = v8::Number::new(scope, metadata.mode() as f64);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() as f64
+    };
+    #[cfg(windows)]
+    let mode = metadata.mode() as f64;
+    let mode = v8::Number::new(scope, mode);
     stat.set(scope, id.into(), mode.into());
 
     let id = v8::String::new(scope, "nlink").unwrap();
-    let nlink = v8::Number::new(scope, metadata.nlink() as f64);
+    #[cfg(unix)]
+    let nlink = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink() as f64
+    };
+    #[cfg(windows)]
+    let nlink = metadata.nlink() as f64;
+    let nlink = v8::Number::new(scope, nlink);
     stat.set(scope, id.into(), nlink.into());
 
     let id = v8::String::new(scope, "uid").unwrap();
-    let uid = v8::Number::new(scope, metadata.uid() as f64);
+    #[cfg(unix)]
+    let uid = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.uid() as f64
+    };
+    #[cfg(windows)]
+    let uid = metadata.uid() as f64;
+    let uid = v8::Number::new(scope, uid);
     stat.set(scope, id.into(), uid.into());
 
     let id = v8::String::new(scope, "gid").unwrap();
-    let gid = v8::Number::new(scope, metadata.gid() as f64);
+    #[cfg(unix)]
+    let gid = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.gid() as f64
+    };
+    #[cfg(windows)]
+    let gid = metadata.gid() as f64;
+    let gid = v8::Number::new(scope, gid);
     stat.set(scope, id.into(), gid.into());
 
     let id = v8::String::new(scope, "rdev").unwrap();
-    let rdev = v8::Number::new(scope, metadata.rdev() as f64);
+    #[cfg(unix)]
+    let rdev = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.rdev() as f64
+    };
+    #[cfg(windows)]
+    let rdev = metadata.rdev() as f64;
+    let rdev = v8::Number::new(scope, rdev);
     stat.set(scope, id.into(), rdev.into());
 
     let id = v8::String::new(scope, "size").unwrap();
-    let size = v8::Number::new(scope, metadata.size() as f64);
+    #[cfg(unix)]
+    let size = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.size() as f64
+    };
+    #[cfg(windows)]
+    let size = metadata.size() as f64;
+    let size = v8::Number::new(scope, size);
     stat.set(scope, id.into(), size.into());
 
     let id = v8::String::new(scope, "atime").unwrap();
-    let atime = v8::Number::new(scope, metadata.atime() as f64);
+    #[cfg(unix)]
+    let atime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.atime() as f64
+    };
+    #[cfg(windows)]
+    let atime = metadata.atime() as f64;
+    let atime = v8::Number::new(scope, atime);
     stat.set(scope, id.into(), atime.into());
 
     let id = v8::String::new(scope, "mtime").unwrap();
-    let mtime = v8::Number::new(scope, metadata.mtime() as f64);
+    #[cfg(unix)]
+    let mtime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mtime() as f64
+    };
+    #[cfg(windows)]
+    let mtime = metadata.mtime() as f64;
+    let mtime = v8::Number::new(scope, mtime);
     stat.set(scope, id.into(), mtime.into());
 
     let id = v8::String::new(scope, "ctime").unwrap();
-    let ctime = v8::Number::new(scope, metadata.ctime() as f64);
+    #[cfg(unix)]
+    let ctime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ctime() as f64
+    };
+    #[cfg(windows)]
+    let ctime = metadata.ctime() as f64;
+    let ctime = v8::Number::new(scope, ctime);
     stat.set(scope, id.into(), ctime.into());
 
     ret.set(stat.into());
@@ -1207,18 +1749,38 @@ fn lstat(
         0
     } else if filetype.is_dir() {
         1
-    } else if filetype.is_char_device() {
-        2
-    } else if filetype.is_block_device() {
-        3
     } else if filetype.is_symlink() {
         4
-    } else if filetype.is_fifo() {
-        5
-    } else if filetype.is_socket() {
-        6
     } else {
-        panic!()
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if filetype.is_char_device() {
+                2
+            } else if filetype.is_block_device() {
+                3
+            } else if filetype.is_fifo() {
+                5
+            } else if filetype.is_socket() {
+                6
+            } else {
+                0 // Default to regular file
+            }
+        }
+        #[cfg(windows)]
+        {
+            if filetype.is_char_device() {
+                2
+            } else if filetype.is_block_device() {
+                3
+            } else if filetype.is_fifo() {
+                5
+            } else if filetype.is_socket() {
+                6
+            } else {
+                0 // Default to regular file
+            }
+        }
     };
 
     let stat = v8::Object::new(scope);
@@ -1228,47 +1790,124 @@ fn lstat(
     stat.set(scope, id.into(), kind.into());
 
     let id = v8::String::new(scope, "dev").unwrap();
-    let dev = v8::Number::new(scope, metadata.dev() as f64);
+    #[cfg(unix)]
+    let dev = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.dev() as f64
+    };
+    #[cfg(windows)]
+    let dev = metadata.dev() as f64;
+    let dev = v8::Number::new(scope, dev);
     stat.set(scope, id.into(), dev.into());
 
     let id = v8::String::new(scope, "ino").unwrap();
-    let ino = v8::Number::new(scope, metadata.ino() as f64);
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ino() as f64
+    };
+    #[cfg(windows)]
+    let ino = metadata.ino() as f64;
+    let ino = v8::Number::new(scope, ino);
     stat.set(scope, id.into(), ino.into());
 
     let id = v8::String::new(scope, "mode").unwrap();
-    let mode = v8::Number::new(scope, metadata.mode() as f64);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() as f64
+    };
+    #[cfg(windows)]
+    let mode = metadata.mode() as f64;
+    let mode = v8::Number::new(scope, mode);
     stat.set(scope, id.into(), mode.into());
 
     let id = v8::String::new(scope, "nlink").unwrap();
-    let nlink = v8::Number::new(scope, metadata.nlink() as f64);
+    #[cfg(unix)]
+    let nlink = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink() as f64
+    };
+    #[cfg(windows)]
+    let nlink = metadata.nlink() as f64;
+    let nlink = v8::Number::new(scope, nlink);
     stat.set(scope, id.into(), nlink.into());
 
     let id = v8::String::new(scope, "uid").unwrap();
-    let uid = v8::Number::new(scope, metadata.uid() as f64);
+    #[cfg(unix)]
+    let uid = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.uid() as f64
+    };
+    #[cfg(windows)]
+    let uid = metadata.uid() as f64;
+    let uid = v8::Number::new(scope, uid);
     stat.set(scope, id.into(), uid.into());
 
     let id = v8::String::new(scope, "gid").unwrap();
-    let gid = v8::Number::new(scope, metadata.gid() as f64);
+    #[cfg(unix)]
+    let gid = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.gid() as f64
+    };
+    #[cfg(windows)]
+    let gid = metadata.gid() as f64;
+    let gid = v8::Number::new(scope, gid);
     stat.set(scope, id.into(), gid.into());
 
     let id = v8::String::new(scope, "rdev").unwrap();
-    let rdev = v8::Number::new(scope, metadata.rdev() as f64);
+    #[cfg(unix)]
+    let rdev = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.rdev() as f64
+    };
+    #[cfg(windows)]
+    let rdev = metadata.rdev() as f64;
+    let rdev = v8::Number::new(scope, rdev);
     stat.set(scope, id.into(), rdev.into());
 
     let id = v8::String::new(scope, "size").unwrap();
-    let size = v8::Number::new(scope, metadata.size() as f64);
+    #[cfg(unix)]
+    let size = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.size() as f64
+    };
+    #[cfg(windows)]
+    let size = metadata.size() as f64;
+    let size = v8::Number::new(scope, size);
     stat.set(scope, id.into(), size.into());
 
     let id = v8::String::new(scope, "atime").unwrap();
-    let atime = v8::Number::new(scope, metadata.atime() as f64);
+    #[cfg(unix)]
+    let atime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.atime() as f64
+    };
+    #[cfg(windows)]
+    let atime = metadata.atime() as f64;
+    let atime = v8::Number::new(scope, atime);
     stat.set(scope, id.into(), atime.into());
 
     let id = v8::String::new(scope, "mtime").unwrap();
-    let mtime = v8::Number::new(scope, metadata.mtime() as f64);
+    #[cfg(unix)]
+    let mtime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mtime() as f64
+    };
+    #[cfg(windows)]
+    let mtime = metadata.mtime() as f64;
+    let mtime = v8::Number::new(scope, mtime);
     stat.set(scope, id.into(), mtime.into());
 
     let id = v8::String::new(scope, "ctime").unwrap();
-    let ctime = v8::Number::new(scope, metadata.ctime() as f64);
+    #[cfg(unix)]
+    let ctime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ctime() as f64
+    };
+    #[cfg(windows)]
+    let ctime = metadata.ctime() as f64;
+    let ctime = v8::Number::new(scope, ctime);
     stat.set(scope, id.into(), ctime.into());
 
     ret.set(stat.into());
@@ -1307,18 +1946,38 @@ fn fstat(
         0
     } else if filetype.is_dir() {
         1
-    } else if filetype.is_char_device() {
-        2
-    } else if filetype.is_block_device() {
-        3
     } else if filetype.is_symlink() {
         4
-    } else if filetype.is_fifo() {
-        5
-    } else if filetype.is_socket() {
-        6
     } else {
-        panic!()
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if filetype.is_char_device() {
+                2
+            } else if filetype.is_block_device() {
+                3
+            } else if filetype.is_fifo() {
+                5
+            } else if filetype.is_socket() {
+                6
+            } else {
+                0 // Default to regular file
+            }
+        }
+        #[cfg(windows)]
+        {
+            if filetype.is_char_device() {
+                2
+            } else if filetype.is_block_device() {
+                3
+            } else if filetype.is_fifo() {
+                5
+            } else if filetype.is_socket() {
+                6
+            } else {
+                0 // Default to regular file
+            }
+        }
     };
 
     let stat = v8::Object::new(scope);
@@ -1328,47 +1987,124 @@ fn fstat(
     stat.set(scope, id.into(), kind.into());
 
     let id = v8::String::new(scope, "dev").unwrap();
-    let dev = v8::Number::new(scope, metadata.dev() as f64);
+    #[cfg(unix)]
+    let dev = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.dev() as f64
+    };
+    #[cfg(windows)]
+    let dev = metadata.dev() as f64;
+    let dev = v8::Number::new(scope, dev);
     stat.set(scope, id.into(), dev.into());
 
     let id = v8::String::new(scope, "ino").unwrap();
-    let ino = v8::Number::new(scope, metadata.ino() as f64);
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ino() as f64
+    };
+    #[cfg(windows)]
+    let ino = metadata.ino() as f64;
+    let ino = v8::Number::new(scope, ino);
     stat.set(scope, id.into(), ino.into());
 
     let id = v8::String::new(scope, "mode").unwrap();
-    let mode = v8::Number::new(scope, metadata.mode() as f64);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() as f64
+    };
+    #[cfg(windows)]
+    let mode = metadata.mode() as f64;
+    let mode = v8::Number::new(scope, mode);
     stat.set(scope, id.into(), mode.into());
 
     let id = v8::String::new(scope, "nlink").unwrap();
-    let nlink = v8::Number::new(scope, metadata.nlink() as f64);
+    #[cfg(unix)]
+    let nlink = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink() as f64
+    };
+    #[cfg(windows)]
+    let nlink = metadata.nlink() as f64;
+    let nlink = v8::Number::new(scope, nlink);
     stat.set(scope, id.into(), nlink.into());
 
     let id = v8::String::new(scope, "uid").unwrap();
-    let uid = v8::Number::new(scope, metadata.uid() as f64);
+    #[cfg(unix)]
+    let uid = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.uid() as f64
+    };
+    #[cfg(windows)]
+    let uid = metadata.uid() as f64;
+    let uid = v8::Number::new(scope, uid);
     stat.set(scope, id.into(), uid.into());
 
     let id = v8::String::new(scope, "gid").unwrap();
-    let gid = v8::Number::new(scope, metadata.gid() as f64);
+    #[cfg(unix)]
+    let gid = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.gid() as f64
+    };
+    #[cfg(windows)]
+    let gid = metadata.gid() as f64;
+    let gid = v8::Number::new(scope, gid);
     stat.set(scope, id.into(), gid.into());
 
     let id = v8::String::new(scope, "rdev").unwrap();
-    let rdev = v8::Number::new(scope, metadata.rdev() as f64);
+    #[cfg(unix)]
+    let rdev = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.rdev() as f64
+    };
+    #[cfg(windows)]
+    let rdev = metadata.rdev() as f64;
+    let rdev = v8::Number::new(scope, rdev);
     stat.set(scope, id.into(), rdev.into());
 
     let id = v8::String::new(scope, "size").unwrap();
-    let size = v8::Number::new(scope, metadata.size() as f64);
+    #[cfg(unix)]
+    let size = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.size() as f64
+    };
+    #[cfg(windows)]
+    let size = metadata.size() as f64;
+    let size = v8::Number::new(scope, size);
     stat.set(scope, id.into(), size.into());
 
     let id = v8::String::new(scope, "atime").unwrap();
-    let atime = v8::Number::new(scope, metadata.atime() as f64);
+    #[cfg(unix)]
+    let atime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.atime() as f64
+    };
+    #[cfg(windows)]
+    let atime = metadata.atime() as f64;
+    let atime = v8::Number::new(scope, atime);
     stat.set(scope, id.into(), atime.into());
 
     let id = v8::String::new(scope, "mtime").unwrap();
-    let mtime = v8::Number::new(scope, metadata.mtime() as f64);
+    #[cfg(unix)]
+    let mtime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mtime() as f64
+    };
+    #[cfg(windows)]
+    let mtime = metadata.mtime() as f64;
+    let mtime = v8::Number::new(scope, mtime);
     stat.set(scope, id.into(), mtime.into());
 
     let id = v8::String::new(scope, "ctime").unwrap();
-    let ctime = v8::Number::new(scope, metadata.ctime() as f64);
+    #[cfg(unix)]
+    let ctime = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ctime() as f64
+    };
+    #[cfg(windows)]
+    let ctime = metadata.ctime() as f64;
+    let ctime = v8::Number::new(scope, ctime);
     stat.set(scope, id.into(), ctime.into());
 
     ret.set(stat.into());
@@ -1384,7 +2120,6 @@ fn fchmod(
     let fd = fd.to_number(scope).unwrap().value() as i32;
     let mode = args.get(1);
     let mode = mode.to_number(scope).unwrap().value() as u32;
-    let permission = Permissions::from_mode(mode);
     let context = scope.get_current_context();
     let fd_table = context.get_slot_mut::<FdTable>().unwrap();
     let file = match fd_table.get(fd) {
@@ -1396,15 +2131,52 @@ fn fchmod(
             return;
         }
     };
-    match file.set_permissions(permission) {
-        Err(err) => {
-            let message = v8::String::new(scope, &err.to_string()).unwrap();
-            let exn = v8::Exception::error(scope, message);
-            scope.throw_exception(exn);
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permission = Permissions::from_mode(mode);
+        match file.set_permissions(permission) {
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+            }
+            Ok(_) => {
+                let undefined = v8::undefined(scope);
+                ret.set(undefined.into())
+            }
         }
-        Ok(_) => {
-            let undefined = v8::undefined(scope);
-            ret.set(undefined.into())
+    }
+    
+    #[cfg(windows)]
+    {
+        // On Windows, we can only toggle read-only flag
+        // mode & 0o200 == 0 means no write permission (read-only)
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+                return;
+            }
+        };
+        
+        let mut permissions = metadata.permissions();
+        let readonly = (mode & 0o200) == 0;
+        permissions.set_readonly(readonly);
+        
+        match file.set_permissions(permissions) {
+            Err(err) => {
+                let message = v8::String::new(scope, &err.to_string()).unwrap();
+                let exn = v8::Exception::error(scope, message);
+                scope.throw_exception(exn);
+            }
+            Ok(_) => {
+                let undefined = v8::undefined(scope);
+                ret.set(undefined.into())
+            }
         }
     }
 }
@@ -1609,6 +2381,11 @@ pub fn init_wasmoo<'s>(
     obj: v8::Local<'s, v8::Object>,
     scope: &mut v8::HandleScope<'s>,
 ) -> v8::Local<'s, v8::Object> {
+    let on_windows = v8::FunctionTemplate::new(scope, on_windows);
+    let on_windows = on_windows.get_function(scope).unwrap();
+    let ident = v8::String::new(scope, "on_windows").unwrap();
+    obj.set(scope, ident.into(), on_windows.into());
+
     let getenv = v8::FunctionTemplate::new(scope, getenv);
     let getenv = getenv.get_function(scope).unwrap();
     let ident = v8::String::new(scope, "getenv").unwrap();
