@@ -44,3 +44,40 @@ jobs:
       - name: check moonc version (Windows)
         if: runner.os == 'Windows'
         run: .\target\debug\moonc_wasm.exe -v
+
+      - name: install mbt toolchain (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+      
+      - name: install mbt toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Set-ExecutionPolicy RemoteSigned -Scope CurrentUser; irm https://cli.moonbitlang.com/install/powershell.ps1 | iex
+          "C:\Users\runneradmin\.moon\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      
+      - name: check moonbit toolchain compatibility (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv target/debug/moonc_wasm "$HOME/.moon/bin"
+          cd "$HOME/.moon/lib/core"
+          moon clean && moon check --target all
+          moon clean && moon check --target native
+          moon clean && moon bundle --target all
+          moon clean && moon bundle --target native
+          moon clean && moon test --target all
+          moon clean && moon test --target native
+      
+      - name: check moonbit toolchain compatibility (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Move-Item -Path .\target\debug\moonc_wasm.exe -Destination "$env:USERPROFILE\.moon\bin"
+          Set-Location -Path "C:\Users\runneradmin\.moon\lib\core"
+          moon clean && moon check --target all
+          moon clean && moon check --target native
+          moon clean && moon bundle --target all
+          moon clean && moon bundle --target native
+          moon clean && moon test --target all
+          moon clean && moon test --target native
+          
