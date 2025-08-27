@@ -2245,7 +2245,7 @@ fn load_wasm_file(
     _args: v8::FunctionCallbackArguments,
     mut ret: v8::ReturnValue,
 ) {
-    let contents = Vec::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/moonc/moonc.wasm")));
+    let contents = Vec::from(include_bytes!(concat!(env!("OUT_DIR"), "/moonc.wasm")));
     let len = contents.len();
     let array_buffer = v8::ArrayBuffer::with_backing_store(
         scope,
