@@ -2,6 +2,7 @@
 name = "moonc_wasm"
 version = "0.6.24"
 edition = "2024"
+exclude = [".github/*"]
 
 [lib]
 
