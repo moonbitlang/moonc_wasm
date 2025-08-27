@@ -39,11 +39,11 @@ jobs:
 
       - name: check moonc version (Unix)
         if: runner.os != 'Windows'
-        run: ./target/debug/moonc_wasm -v
+        run: ./target/debug/moonc -v
 
       - name: check moonc version (Windows)
         if: runner.os == 'Windows'
-        run: .\target\debug\moonc_wasm.exe -v
+        run: .\target\debug\moonc.exe -v
 
       - name: install mbt toolchain (Unix)
         if: runner.os != 'Windows'
@@ -60,7 +60,7 @@ jobs:
       - name: check moonbit toolchain compatibility (Unix)
         if: runner.os != 'Windows'
         run: |
-          mv target/debug/moonc_wasm "$HOME/.moon/bin"
+          mv target/debug/moonc "$HOME/.moon/bin/moonc"
           cd "$HOME/.moon/lib/core"
           moon clean && moon check --target all
           moon clean && moon check --target native
@@ -72,7 +72,7 @@ jobs:
       - name: check moonbit toolchain compatibility (Windows)
         if: runner.os == 'Windows'
         run: |
-          Move-Item -Path .\target\debug\moonc_wasm.exe -Destination "$env:USERPROFILE\.moon\bin"
+          cp .\target\debug\moonc.exe "C:\Users\runneradmin\.moon\bin\moonc.exe"
           Set-Location -Path "C:\Users\runneradmin\.moon\lib\core"
           moon clean && moon check --target all
           moon clean && moon check --target native
