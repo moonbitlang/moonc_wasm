@@ -43,7 +43,7 @@ fn run_wasmoo(argv: Vec<String>) -> anyhow::Result<()> {
         false,
         None,
     );
-    let code = v8::Script::compile(scope, code, Some(&origin)).unwrap();
+    let code = v8::Script::compile(scope, code, Some(&origin)).ok_or(anyhow::anyhow!("Failed to compile load script"))?;
     code.run(scope);
     Ok(())
 }
