@@ -1,6 +1,6 @@
 [package]
 name = "moonc_wasm"
-version = "0.6.19"
+version = "0.6.24"
 edition = "2024"
 
 [lib]
@@ -12,6 +12,14 @@ libc = "0.2.172"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "winerror", "winbase", "handleapi", "processenv"] }
+
+[build-dependencies]
+anyhow = "1.0.86"
+reqwest = { version = "0.12", features = ["blocking"] }
+# For handling .tar archives
+tar = "0.4"
+# For Gzip decompression (.gz)
+flate2 = "1.0"
 
 [[bin]]
 name = "moonc_wasm"
