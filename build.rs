@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, io::Read};
 use std::path::PathBuf;
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -8,6 +8,8 @@ const ARCHIVE_URL: &str = "https://github.com/moonbitlang/moonbit-compiler/relea
 const TARGET_DIR_IN_ARCHIVE: &str = "./moonc.assets";
 const TARGET_EXTENSION: &str = "wasm";
 const FINAL_FILE_NAME: &str = "moonc.wasm";
+const MOON_VERSION: &str = "./moon_version";
+const CORE_VERSION: &str = "./core_version";
 
 fn main() -> Result<()> {
     // Tell Cargo to rerun this script if build.rs changes
@@ -20,6 +22,7 @@ fn main() -> Result<()> {
 
     //  Download the file using reqwest (blocking)
     //  Using a blocking request is simpler in a build script
+    println!("cargo:warning=Downloading moonc.wasm...");
     let response = reqwest::blocking::get(ARCHIVE_URL)
         .with_context(|| format!("Failed to download file from URL: {}", ARCHIVE_URL))?;
 
@@ -40,14 +43,22 @@ fn main() -> Result<()> {
         let mut entry = entry_result.context("Failed to read archive entry")?;
         let path = entry.path()?.to_path_buf();
         // Check if the entry is in the target directory and has the correct extension
-        if path.starts_with(TARGET_DIR_IN_ARCHIVE) && path.extension().and_then(|s| s.to_str()) == Some(TARGET_EXTENSION) {
+        if !entry_found && path.starts_with(TARGET_DIR_IN_ARCHIVE) && path.extension().and_then(|s| s.to_str()) == Some(TARGET_EXTENSION) {
             println!("cargo:info=Found target file in archive: {:?}", path);
             
             entry.unpack(&dest_path)
                 .with_context(|| format!("Failed to unpack file {:?} to {:?}", path, dest_path))?;
             
             entry_found = true;
-            break; // File found and extracted, no need to continue
+        }
+
+        if let Some(str) = path.to_str() {
+            if str == MOON_VERSION || str == CORE_VERSION {
+                let mut version = String::new();
+                entry.read_to_string(&mut version)
+                    .with_context(|| format!("Failed to read version file {:?} in Archive", path))?;
+                println!("cargo:warning={:?} = {:?}", str, version.trim());
+            }
         }
     }
 
