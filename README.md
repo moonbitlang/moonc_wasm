@@ -10,3 +10,8 @@ WebAssembly based MoonBit Compiler
 cargo add --git https://github.com/moonbitlang/moonc_wasm
 ```
 
++ as binary
+
+```shell
+cargo install --git https://github.com/moonbitlang/moonc_wasm
+```
