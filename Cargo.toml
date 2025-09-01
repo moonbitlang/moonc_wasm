@@ -1,7 +1,7 @@
 [package]
 name = "moonc_wasm"
-version = "0.6.24"
-edition = "2024"
+version = "0.6.25"
+edition = "2018"
 exclude = [".github/*"]
 description = "Wasm version MoonBit Compiler Loader"
 license = "Apache-2.0"
