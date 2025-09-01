@@ -8,8 +8,8 @@ const ARCHIVE_URL: &str = "https://github.com/moonbitlang/moonbit-compiler/relea
 const TARGET_DIR_IN_ARCHIVE: &str = "moonc.assets";
 const TARGET_EXTENSION: &str = "wasm";
 const FINAL_FILE_NAME: &str = "moonc.wasm";
-const MOON_VERSION: &str = "./moon_version";
-const CORE_VERSION: &str = "./core_version";
+const MOON_VERSION: &str = "moon_version";
+const CORE_VERSION: &str = "core_version";
 
 fn main() -> Result<()> {
     // Tell Cargo to rerun this script if build.rs changes
