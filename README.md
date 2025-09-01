@@ -7,11 +7,11 @@ WebAssembly based MoonBit Compiler
 + as library
 
 ```shell
-cargo add --git https://github.com/moonbitlang/moonc_wasm
+cargo add moonc_wasm
 ```
 
 + as binary
 
 ```shell
-cargo install --git https://github.com/moonbitlang/moonc_wasm
+cargo install moonc_wasm
 ```
