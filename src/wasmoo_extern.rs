@@ -14,7 +14,7 @@ use std::{ffi::CString, fs::Permissions};
 #[cfg(unix)]
 use std::os::{
     fd::AsRawFd,
-    unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    unix::fs::{PermissionsExt},
 };
 
 
