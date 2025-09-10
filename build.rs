@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use tar::Archive;
 
-const ARCHIVE_URL: &str = "https://github.com/moonbitlang/moonbit-compiler/releases/download/v0.6.25%2Bff75acabd/moonbit-wasm.tar.gz";
-const TARGET_DIR_IN_ARCHIVE: &str = "moonc.assets";
+const ARCHIVE_URL: &str = "https://github.com/moonbitlang/moonbit-compiler/releases/download/v0.6.26%2B4cdee97dd/moonbit-wasm.tar.gz";
+const TARGET_DIR_IN_ARCHIVE: &str = "./moonc.assets";
 const TARGET_EXTENSION: &str = "wasm";
 const FINAL_FILE_NAME: &str = "moonc.wasm";
-const MOON_VERSION: &str = "moon_version";
-const CORE_VERSION: &str = "core_version";
+const MOON_VERSION: &str = "./moon_version";
+const CORE_VERSION: &str = "./core_version";
 
 fn main() -> Result<()> {
     // Tell Cargo to rerun this script if build.rs changes
