@@ -1,6 +1,6 @@
 mod wasmoo_extern;
 
-fn run_wasmoo(argv: Vec<String>) -> anyhow::Result<()> {
+pub fn run_wasmoo(argv: Vec<String>) -> anyhow::Result<()> {
     let isolate = &mut v8::Isolate::new(Default::default());
     isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
     let scope = &mut v8::HandleScope::new(isolate);
@@ -43,12 +43,13 @@ fn run_wasmoo(argv: Vec<String>) -> anyhow::Result<()> {
         false,
         None,
     );
-    let code = v8::Script::compile(scope, code, Some(&origin)).ok_or(anyhow::anyhow!("Failed to compile load script"))?;
+    let code = v8::Script::compile(scope, code, Some(&origin))
+        .ok_or(anyhow::anyhow!("Failed to compile load script"))?;
     code.run(scope);
     Ok(())
 }
 
-fn initialize_v8() -> anyhow::Result<()> {
+pub fn initialize_v8() -> anyhow::Result<()> {
     v8::V8::set_flags_from_string(&format!("--stack-size={}", 102400));
     v8::V8::set_flags_from_string("--experimental-wasm-exnref");
     v8::V8::set_flags_from_string("--experimental-wasm-imported-strings");
