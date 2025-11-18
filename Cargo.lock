@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "moonc_wasm"
-version = "0.6.26"
+version = "0.6.32"
 dependencies = [
  "anyhow",
  "flate2",
