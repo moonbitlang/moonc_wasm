@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use tar::Archive;
 
-const ARCHIVE_URL: &str = "https://github.com/moonbitlang/moonbit-compiler/releases/download/v0.6.32%2B6f48aae3f/moonbit-wasm.tar.gz";
+const ARCHIVE_URL: &str = "https://github.com/moonbitlang/moonbit-compiler/releases/download/v0.8.3%2Bcd28f524e/moonbit-wasm.tar.gz";
 const TARGET_DIR_IN_ARCHIVE: &str = "./moonc.assets";
 const TARGET_EXTENSION: &str = "wasm";
 const FINAL_FILE_NAME: &str = "moonc.wasm";
